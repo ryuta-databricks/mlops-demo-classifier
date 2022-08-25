@@ -1,0 +1,140 @@
+# This GitHub workflow deploys Terraform resources (ML resource config and more)
+# defined under databricks-config, when PRs are merged into the default branch
+name: Terraform Deployment for mlops-demo-classifier
+
+on:
+  push:
+    branches:
+      - 'main'
+    paths:
+      - 'databricks-config/**'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: ./databricks-config
+
+jobs:
+  staging:
+    runs-on: ubuntu-20.04
+    env:
+      DATABRICKS_HOST: https://e2-demo-emea.cloud.databricks.com/
+      DATABRICKS_TOKEN: ${{secrets.STAGING_WORKSPACE_TOKEN}}
+    steps:
+      - uses: actions/checkout@v3
+      # TODO: Remove this workflow step after addressing other TODOs
+      - name: Lint workflow files
+        run: ../.github/workflows/scripts/no-todos.sh "../.github/workflows" "*.yml"
+      - uses: hashicorp/setup-terraform@v1
+      - name: Terraform fmt
+        id: fmt
+        run: terraform -chdir=staging fmt -check
+        continue-on-error: true
+        # TODO: Provide necessary terraform backend credentials here.
+        # Typically, you can achieve this by running a GitHub Action or CLI command to fetch
+        # auth information, setting the auth information as an environment variable for use by
+        # subsequent terraform CLI steps.
+        # 
+        # For example, if using the s3 backend, you can use the aws-actions/configure-aws-credentials Action
+        # (https://github.com/marketplace/actions/configure-aws-credentials-action-for-github-actions) to authenticate
+        # to AWS. This should set environment variables that the Terraform S3 backend picks up automatically
+        # (https://www.terraform.io/language/settings/backends/s3#credentials-and-shared-configuration)
+        #
+        # Note that GitHub Actions has special syntax for setting environment variables within a workflow step, described in
+        # https://docs.github.com/en/actions/using-workflows/workflow-commands-for-github-actions#setting-an-environment-variable
+      - name: Terraform Init
+        id: init
+        run: terraform -chdir=staging init
+      - name: Terraform Validate
+        id: validate
+        run: terraform -chdir=staging validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform -chdir=staging plan -no-color \
+          -var="git_repo_url=${{ github.server_url }}/${{ github.repository }}" \
+          -var="github_repo=${{ github.repository }}" \
+          -var="github_actions_token=${{ secrets.TRIGGER_WORKFLOWS_GITHUB_TOKEN }}"
+      - name: Terraform Apply
+        id: apply
+        run: |
+          terraform -chdir=staging apply -auto-approve \
+          -var="git_repo_url=${{ github.server_url }}/${{ github.repository }}" \
+          -var="github_repo=${{ github.repository }}" \
+          -var="github_actions_token=${{ secrets.TRIGGER_WORKFLOWS_GITHUB_TOKEN }}"
+      - name: Terraform Output
+        id: output
+        run: terraform -chdir=staging output -json
+
+      - name: Commit Terraform Output to File
+        id: commit
+        run: |
+          mkdir -p output
+          echo '${{ steps.output.outputs.stdout }}' | jq '.' > output/staging.json
+          git config --global user.name 'Terraform Output Github Workflow'
+          git config --global user.email '<>'
+          output=$(git status --porcelain)
+          if [ -n "$output" ]
+          then
+            git add -A
+            git commit -m "Commit staging output"
+            git push
+          fi
+
+  prod:
+    needs: staging
+    runs-on: ubuntu-20.04
+    env:
+      DATABRICKS_HOST: https://e2-demo-emea.cloud.databricks.com/
+      DATABRICKS_TOKEN: ${{secrets.PROD_WORKSPACE_TOKEN}}
+    steps:
+      - uses: actions/checkout@v3
+      - uses: hashicorp/setup-terraform@v1
+      - name: Terraform fmt
+        id: fmt
+        run: terraform -chdir=prod fmt -check
+        continue-on-error: true
+        # TODO: Provide necessary terraform backend credentials here, similar to staging above
+      - name: Terraform Init
+        id: init
+        run: terraform -chdir=prod init
+      - name: Terraform Validate
+        id: validate
+        run: terraform -chdir=prod validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform -chdir=prod plan -no-color \
+          -var="git_repo_url=${{ github.server_url }}/${{ github.repository }}" \
+          -var="github_repo=${{ github.repository }}" \
+          -var="github_actions_token=${{ secrets.TRIGGER_WORKFLOWS_GITHUB_TOKEN }}"
+
+      - name: Terraform Apply
+        id: apply
+        run: |
+          terraform -chdir=prod apply -auto-approve \
+          -var="git_repo_url=${{ github.server_url }}/${{ github.repository }}" \
+          -var="github_repo=${{ github.repository }}" \
+          -var="github_actions_token=${{ secrets.TRIGGER_WORKFLOWS_GITHUB_TOKEN }}"
+
+      - name: Terraform Output
+        id: output
+        run: terraform -chdir=prod output -json
+
+      - name: Commit Terraform Output to File
+        id: commit
+        run: |
+          git pull
+          mkdir -p output
+          echo '${{ steps.output.outputs.stdout }}' | jq '.' > output/prod.json
+          git config --global user.name 'Terraform Output Github Workflow'
+          git config --global user.email '<>'
+          output=$(git status --porcelain)
+          if [ -n "$output" ]
+          then
+            git add -A
+            git commit -m "Commit prod output"
+            git push
+          fi
